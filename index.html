@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Spectrogram with Normalization Options</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .spectrogram {
+            width: 100%;
+            height: 400px;
+            background-color: #1a1a1a;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            background-color: #4CAF50;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .controls {
+            margin: 20px 0;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .gain-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .gain-slider {
+            width: 200px;
+        }
+        .gain-value {
+            min-width: 60px;
+            text-align: center;
+        }
+        .auto-gain {
+            background-color: #2196F3;
+        }
+        .auto-gain:hover {
+            background-color: #1976D2;
+        }
+        .normalization-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .baseline-button {
+            background-color: #FF9800;
+        }
+        .baseline-button:hover {
+            background-color: #F57C00;
+        }
+        .baseline-button.recording {
+            background-color: #f44336;
+        }
+        .baseline-button.recording:hover {
+            background-color: #d32f2f;
+        }
+        select {
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const AudioSpectrogram = () => {
+            const [isRecording, setIsRecording] = React.useState(false);
+            const [audioContext, setAudioContext] = React.useState(null);
+            const [analyser, setAnalyser] = React.useState(null);
+            const [mediaStream, setMediaStream] = React.useState(null);
+            const [gainNode, setGainNode] = React.useState(null);
+            const [gainValue, setGainValue] = React.useState(1);
+            const [normalizationMode, setNormalizationMode] = React.useState('none');
+            const [isRecordingBaseline, setIsRecordingBaseline] = React.useState(false);
+            const [baselineData, setBaselineData] = React.useState(null);
+            const [bandCount, setBandCount] = React.useState(100);
+            const canvasRef = React.useRef(null);
+            const animationRef = React.useRef(null);
+            const dataArrayRef = React.useRef(null);
+
+            // Add this new function to handle band averaging
+            const averageFrequencyBands = (data, targetBands) => {
+                if (!data) return new Uint8Array(targetBands);
+                const bandsPerGroup = Math.floor(data.length / targetBands);
+                const result = new Uint8Array(targetBands);
+                
+                for (let i = 0; i < targetBands; i++) {
+                    let sum = 0;
+                    const startIdx = i * bandsPerGroup;
+                    const endIdx = Math.min(startIdx + bandsPerGroup, data.length);
+                    
+                    for (let j = startIdx; j < endIdx; j++) {
+                        sum += data[j];
+                    }
+                    
+                    result[i] = sum / (endIdx - startIdx);
+                }
+                
+                return result;
+            };
+
+            const startRecording = async () => {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const context = new (window.AudioContext || window.webkitAudioContext)();
+                    const sourceNode = context.createMediaStreamSource(stream);
+                    const analyserNode = context.createAnalyser();
+                    const gainNode = context.createGain();
+                    
+                    analyserNode.fftSize = 2048;
+                    sourceNode.connect(gainNode);
+                    gainNode.connect(analyserNode);
+                    gainNode.gain.value = gainValue;
+                    
+                    setAudioContext(context);
+                    setAnalyser(analyserNode);
+                    setMediaStream(stream);
+                    setGainNode(gainNode);
+                    setIsRecording(true);
+                    
+                    drawSpectrogram(analyserNode);
+                } catch (error) {
+                    console.error('Error accessing microphone:', error);
+                    alert('Error accessing microphone. Please ensure you have granted microphone permissions.');
+                }
+            };
+
+            const stopRecording = () => {
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(track => track.stop());
+                }
+                if (audioContext) {
+                    audioContext.close();
+                }
+                if (animationRef.current) {
+                    cancelAnimationFrame(animationRef.current);
+                }
+                setIsRecording(false);
+                setAudioContext(null);
+                setAnalyser(null);
+                setMediaStream(null);
+                setGainNode(null);
+                
+                // Clear canvas
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            };
+
+            const handleGainChange = (event) => {
+                const newGain = parseFloat(event.target.value);
+                setGainValue(newGain);
+                if (gainNode) {
+                    gainNode.gain.value = newGain;
+                }
+            };
+
+            const autoAdjustGain = () => {
+                if (!analyser || !dataArrayRef.current) return;
+
+                analyser.getByteFrequencyData(dataArrayRef.current);
+                
+                const sum = dataArrayRef.current.reduce((a, b) => a + b, 0);
+                const average = sum / dataArrayRef.current.length;
+                
+                const targetLevel = 128;
+                const currentLevel = average;
+                
+                const newGain = (targetLevel / currentLevel) * gainValue;
+                const clampedGain = Math.max(0.1, Math.min(10, newGain));
+                
+                setGainValue(clampedGain);
+                if (gainNode) {
+                    gainNode.gain.value = clampedGain;
+                }
+            };
+
+            const recordBaseline = () => {
+                if (!analyser || !dataArrayRef.current) return;
+
+                setIsRecordingBaseline(true);
+                
+                let sampleCount = 0;
+                const samples = [];
+                const sampleInterval = setInterval(() => {
+                    if (sampleCount >= 60) {
+                        clearInterval(sampleInterval);
+                        const rawBaseline = new Uint8Array(dataArrayRef.current.length);
+                        for (let i = 0; i < rawBaseline.length; i++) {
+                            rawBaseline[i] = samples.reduce((sum, sample) => sum + sample[i], 0) / samples.length;
+                        }
+                        // Store averaged bands baseline
+                        setBaselineData(averageFrequencyBands(rawBaseline, bandCount));
+                        setIsRecordingBaseline(false);
+                        return;
+                    }
+                    
+                    const currentData = new Uint8Array(dataArrayRef.current.length);
+                    analyser.getByteFrequencyData(currentData);
+                    samples.push([...currentData]);
+                    sampleCount++;
+                }, 16);
+            };
+
+            const normalizeValue = (value, index, baseline) => {
+                switch (normalizationMode) {
+                    case 'none':
+                        return value;
+                    case '1/f':
+                        return value * Math.sqrt(index + 1);
+                    case 'baseline':
+                        if (!baseline || baseline[index] === 0) return value;
+                        return (value / baseline[index]) * 128;
+                    default:
+                        return value;
+                }
+            };
+
+            const drawSpectrogram = (analyserNode) => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                const bufferLength = analyserNode.frequencyBinCount;
+                const rawDataArray = new Uint8Array(bufferLength);
+                dataArrayRef.current = rawDataArray;
+                
+                const draw = () => {
+                    animationRef.current = requestAnimationFrame(draw);
+                    analyserNode.getByteFrequencyData(rawDataArray);
+                    
+                    // Average the frequency bands
+                    const dataArray = averageFrequencyBands(rawDataArray, bandCount);
+                    
+                    ctx.fillStyle = 'rgba(26, 26, 26, 0.2)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    const barWidth = (canvas.width / bandCount) * 0.95; // Slightly narrower bars
+                    const barGap = (canvas.width / bandCount) * 0.05; // Small gap between bars
+                    let x = 0;
+                    
+                    for (let i = 0; i < bandCount; i++) {
+                        const normalizedValue = normalizeValue(dataArray[i], i, baselineData);
+                        const scaledValue = Math.min(255, normalizedValue);
+                        const barHeight = (scaledValue / 255) * canvas.height;
+                        
+                        const hue = (i / bandCount) * 360;
+                        ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+                        
+                        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                        x += barWidth + barGap;
+                    }
+                };
+                
+                draw();
+            };
+
+            React.useEffect(() => {
+                return () => {
+                    if (animationRef.current) {
+                        cancelAnimationFrame(animationRef.current);
+                    }
+                    if (mediaStream) {
+                        mediaStream.getTracks().forEach(track => track.stop());
+                    }
+                    if (audioContext) {
+                        audioContext.close();
+                    }
+                };
+            }, []);
+
+            return (
+                <div className="container">
+                    <h1>Audio Spectrogram with Normalization Options</h1>
+                    <div className="controls">
+                        <button onClick={isRecording ? stopRecording : startRecording}>
+                            {isRecording ? 'Stop Recording' : 'Start Recording'}
+                        </button>
+                        {isRecording && (
+                            <React.Fragment>
+                                <div className="gain-control">
+                                    <label>Gain:</label>
+                                    <input
+                                        type="range"
+                                        min="0.1"
+                                        max="10"
+                                        step="0.1"
+                                        value={gainValue}
+                                        onChange={handleGainChange}
+                                        className="gain-slider"
+                                    />
+                                    <span className="gain-value">{gainValue.toFixed(1)}x</span>
+                                </div>
+                                <button 
+                                    className="auto-gain"
+                                    onClick={autoAdjustGain}
+                                >
+                                    Auto-Gain
+                                </button>
+                                <div className="normalization-control">
+                                    <label>Normalization:</label>
+                                    <select 
+                                        value={normalizationMode}
+                                        onChange={(e) => {
+                                            setNormalizationMode(e.target.value);
+                                            // Reset baseline when switching to baseline mode
+                                            if (e.target.value === 'baseline') {
+                                                setBaselineData(null);
+                                            }
+                                        }}
+                                    >
+                                        <option value="none">None</option>
+                                        <option value="1/f">1/f</option>
+                                        <option value="baseline">Baseline</option>
+                                    </select>
+                                </div>
+                                {normalizationMode === 'baseline' && (
+                                    <button 
+                                        className={`baseline-button ${isRecordingBaseline ? 'recording' : ''}`}
+                                        onClick={recordBaseline}
+                                        disabled={isRecordingBaseline}
+                                    >
+                                        {isRecordingBaseline ? 'Recording Baseline...' : 'Record Baseline'}
+                                    </button>
+                                )}
+                                <div className="gain-control">
+                                    <label>Frequency Bands:</label>
+                                    <input
+                                        type="range"
+                                        min="10"
+                                        max="500"
+                                        step="10"
+                                        value={bandCount}
+                                        onChange={(e) => {
+                                            const newBandCount = parseInt(e.target.value);
+                                            setBandCount(newBandCount);
+                                            // Update baseline data if it exists
+                                            if (baselineData) {
+                                                const rawBaseline = new Uint8Array(baselineData.length);
+                                                rawBaseline.set(baselineData);
+                                                setBaselineData(averageFrequencyBands(rawBaseline, newBandCount));
+                                            }
+                                        }}
+                                        className="gain-slider"
+                                    />
+                                    <span className="gain-value">{bandCount}</span>
+                                </div>
+                            </React.Fragment>
+                        )}
+                    </div>
+                    <canvas 
+                        ref={canvasRef}
+                        className="spectrogram"
+                        width={1000}
+                        height={400}
+                    />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<AudioSpectrogram />);
+    </script>
+</body>
+</html> 
